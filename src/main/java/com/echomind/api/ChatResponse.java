@@ -53,6 +53,8 @@ public record ChatResponse(
         @Schema(description = "各环节耗时，单位毫秒。并行执行时各环节之和会大于总耗时")
         Map<String, Long> stageTimingsMs,
         @Schema(description = "走了降级（超时或失败）的环节")
-        List<String> degradedStages
+        List<String> degradedStages,
+        @Schema(description = "转人工时关联的工单 ID；同一会话已有未结工单时返回那一张", example = "12")
+        Long ticketId
 ) {
 }

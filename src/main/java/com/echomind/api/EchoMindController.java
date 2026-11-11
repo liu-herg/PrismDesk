@@ -13,6 +13,9 @@ import com.echomind.intent.IntentRecognizer;
 import com.echomind.intent.IntentResult;
 import com.echomind.knowledge.KnowledgeBaseService;
 import com.echomind.lock.ConversationLock;
+import com.echomind.intent.UrgencyLevel;
+import com.echomind.ticket.Escalation;
+import com.echomind.ticket.TicketService;
 import com.echomind.knowledge.SearchResult;
 import com.echomind.memory.MemoryContext;
 import com.echomind.memory.MemoryManager;
@@ -74,6 +77,7 @@ public class EchoMindController {
     private final ConversationService conversationService;
     private final ConversationLock conversationLock;
     private final EchoMindProperties properties;
+    private final TicketService ticketService;
     private final Executor stageExecutor;
     private final Executor workerExecutor;
 
@@ -92,6 +96,7 @@ public class EchoMindController {
             ConversationService conversationService,
             ConversationLock conversationLock,
             EchoMindProperties properties,
+            TicketService ticketService,
             @Qualifier("stageExecutor") Executor stageExecutor,
             @Qualifier("workerExecutor") Executor workerExecutor
     ) {
@@ -109,6 +114,7 @@ public class EchoMindController {
         this.conversationService = conversationService;
         this.conversationLock = conversationLock;
         this.properties = properties;
+        this.ticketService = ticketService;
         this.stageExecutor = stageExecutor;
         this.workerExecutor = workerExecutor;
     }
@@ -230,6 +236,9 @@ public class EchoMindController {
             ));
             return null;
         });
+        Long ticketId = escalated
+                ? timer.record("ticket", () -> openTicket(conversationId, userId, requestId, message, result, intentResult, verification))
+                : null;
         long totalMs = timer.totalMillis();
         Map<String, Long> stageTimings = timer.snapshot();
         recordStageMetrics(stageTimings, totalMs);
@@ -257,8 +266,51 @@ public class EchoMindController {
                 intentResult.sourceScores(),
                 totalMs,
                 stageTimings,
-                timer.degradedStages()
+                timer.degradedStages(),
+                ticketId
         );
+    }
+
+    /**
+     * 转人工时建单。和对话落库一样，建单失败不影响本次回复，只记错误日志。
+     * 同一会话已有未结工单时返回那一张（幂等）。
+     */
+    private Long openTicket(String conversationId, String userId, String requestId, String message,
+                            OrchestratorResult result, IntentResult intentResult,
+                            AnswerVerifier.VerificationResult verification) {
+        try {
+            List<String> reasons = new ArrayList<>();
+            IntentCategory intent = intentResult.intent();
+            if (intent == IntentCategory.HUMAN_HANDOFF || intent == IntentCategory.ESCALATION) {
+                reasons.add("用户要求人工");
+            }
+            if (intentResult.urgency() == UrgencyLevel.CRITICAL) {
+                reasons.add("紧急程度 CRITICAL");
+            }
+            if (verification.needEscalation()) {
+                reasons.add("回答校验建议转人工：" + verification.reason());
+            }
+            if (reasons.isEmpty()) {
+                reasons.add("Agent 回答建议转人工");
+            }
+            String summary = "用户：" + message + "\nAI：" + result.response();
+            TicketService.EscalationResult opened = ticketService.openForEscalation(new Escalation(
+                    conversationId,
+                    userId,
+                    intentResult.urgency() == null ? UrgencyLevel.MEDIUM.name() : intentResult.urgency().name(),
+                    intent == null ? null : intent.name().toLowerCase(Locale.ROOT),
+                    String.join("；", reasons),
+                    summary,
+                    requestId
+            ));
+            if (opened.created()) {
+                log.info("Ticket {} opened for conv={} request={} reason={}", opened.ticket().getId(), conversationId, requestId, reasons);
+            }
+            return opened.ticket().getId();
+        } catch (Exception ex) {
+            log.error("Failed to open ticket conv={} request={}: {}", conversationId, requestId, ex.getMessage());
+            return null;
+        }
     }
 
     /** 知识库检索：超时或失败时降级为不改写、不重排的直接检索（纯内存计算，毫秒级）。 */

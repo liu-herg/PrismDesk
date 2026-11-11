@@ -20,7 +20,7 @@ Java 21 · Spring Boot 3.5 · Spring AI 1.1 · MyBatis-Plus · MySQL 8.4 · Flyw
 - [x] P1-1 MySQL 数据层：见 [docs/P1-数据层.md](docs/P1-数据层.md)
 - [x] P1-2 同一会话并发控制（Redisson 分布式锁）：见 [docs/P1-并发控制.md](docs/P1-并发控制.md)
 - [x] P1-3 线程池、并行化、超时降级：见 [docs/P1-线程池与并行化.md](docs/P1-线程池与并行化.md)
-- [ ] P1-4 工单系统（状态机 + 乐观锁）
+- [x] P1-4 转人工工单（状态机 + 乐观锁抢单 + 幂等建单）：见 [docs/P1-工单.md](docs/P1-工单.md)
 
 ## 运行
 
