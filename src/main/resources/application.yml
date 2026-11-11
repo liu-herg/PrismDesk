@@ -1,0 +1,127 @@
+server:
+  port: ${SERVER_PORT:8080}
+  servlet:
+    encoding:
+      charset: UTF-8
+      # 响应头显式带上 charset=UTF-8；否则 Windows PowerShell 5.1 会按 Latin-1 解码中文
+      force-response: true
+
+spring:
+  application:
+    name: prismdesk
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:anthropic}
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+  mvc:
+    pathmatch:
+      matching-strategy: ANT_PATH_MATCHER
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:prismdesk}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:prismdesk}
+    password: ${MYSQL_PASSWORD:prismdesk123}
+    hikari:
+      maximum-pool-size: ${MYSQL_POOL_SIZE:10}
+      connection-timeout: 3000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:echomind123}
+      timeout: 2s
+  ai:
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:${LLM_STARTUP_API_KEY:echomind-local-placeholder}}
+      base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
+      chat:
+        options:
+          model: ${ANTHROPIC_MODEL:claude-3-5-sonnet-20241022}
+          temperature: 0.2
+          max-tokens: 1024
+    vectorstore:
+      chroma:
+        client:
+          host: ${CHROMA_HOST:http://localhost}
+          port: ${CHROMA_PORT:8001}
+        collection-name: ${CHROMA_COLLECTION:echomind_knowledge}
+        initialize-schema: true
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+
+echomind:
+  pipeline:
+    # true：意图识别和知识库检索并行；false：按原顺序串行（用于对比优化前后的耗时）
+    parallel: ${PIPELINE_PARALLEL:true}
+    intent-timeout-ms: ${PIPELINE_INTENT_TIMEOUT_MS:5000}
+    knowledge-timeout-ms: ${PIPELINE_KNOWLEDGE_TIMEOUT_MS:8000}
+    verify-timeout-ms: ${PIPELINE_VERIFY_TIMEOUT_MS:5000}
+    agent-timeout-ms: ${PIPELINE_AGENT_TIMEOUT_MS:30000}
+  llm:
+    fallback-enabled: ${LLM_FALLBACK_ENABLED:true}
+  memory:
+    ttl-seconds: ${MEMORY_TTL_SECONDS:86400}
+    working-max: ${MEMORY_WORKING_MAX:20}
+    compress-at: ${MEMORY_COMPRESS_AT:15}
+  rag:
+    top-k: ${RAG_TOP_K:4}
+    bm25-weight: ${RAG_BM25_WEIGHT:0.45}
+    vector-weight: ${RAG_VECTOR_WEIGHT:0.55}
+  monitor:
+    success-rate-threshold: ${MONITOR_SUCCESS_RATE_THRESHOLD:0.90}
+    latency-ms-threshold: ${MONITOR_LATENCY_MS_THRESHOLD:3000}
+    webhook-url: ${ALERT_WEBHOOK_URL:}
+  eval:
+    baseline-path: ${EVAL_BASELINE_PATH:data/eval/baseline.json}
+  skills:
+    root-dir: ${ECHOMIND_SKILLS_DIR:skills}
+    max-prompt-chars: ${ECHOMIND_SKILLS_MAX_PROMPT_CHARS:5000}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: deepseek
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatAutoConfiguration
+      - org.springframework.ai.vectorstore.chroma.autoconfigure.ChromaVectorStoreAutoConfiguration
+  ai:
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY:${LLM_STARTUP_API_KEY:echomind-local-placeholder}}
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      chat:
+        options:
+          model: ${DEEPSEEK_MODEL:deepseek-chat}
+          temperature: ${DEEPSEEK_TEMPERATURE:0.2}
+          max-tokens: ${DEEPSEEK_MAX_TOKENS:1024}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: anthropic
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.model.deepseek.autoconfigure.DeepSeekChatAutoConfiguration
+      - org.springframework.ai.vectorstore.chroma.autoconfigure.ChromaVectorStoreAutoConfiguration

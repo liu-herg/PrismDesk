@@ -1,0 +1,126 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: prismdesk-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123}
+      MYSQL_DATABASE: prismdesk
+      MYSQL_USER: prismdesk
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-prismdesk123}
+      TZ: Asia/Shanghai
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    ports:
+      - "${MYSQL_HOST_PORT:-3316}:3306"   # 本机已有 MySQL 占用 3306；容器之间仍走 mysql:3306
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # 必须走 TCP（127.0.0.1 + --protocol=tcp）检查。
+      # MySQL 首次启动会先起一个只监听本地 socket 的临时实例来初始化数据，
+      # 用 -h localhost 会连上这个临时实例，导致"显示健康但 3306 端口还没开"。
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -P 3306 --protocol=tcp -uprismdesk -p$${MYSQL_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: prismdesk-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-echomind123}
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-echomind123}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    container_name: prismdesk-chromadb
+    ports:
+      - "8002:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+    volumes:
+      - chromadb-data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  prismdesk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prismdesk-app
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CHROMA_HOST=http://chromadb
+      - CHROMA_PORT=8000
+      - TZ=Asia/Shanghai          # 应用容器用北京时间，消息时间戳和日志都按本地时间
+      - PIPELINE_PARALLEL=${PIPELINE_PARALLEL:-true}   # 设为 false 可切回串行，用来对比耗时
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-prismdesk123}
+      - LLM_FALLBACK_ENABLED=true
+      - SPRING_PROFILES_ACTIVE=${SPRING_PROFILES_ACTIVE:-anthropic}
+    volumes:
+      - app-data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prismdesk-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    depends_on:
+      prismdesk:
+        condition: service_started
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: prismdesk-nginx
+    ports:
+      - "8081:80"
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      prismdesk:
+        condition: service_started
+
+volumes:
+  mysql-data:
+  redis-data:
+  chromadb-data:
+  app-data:
+  prometheus-data:
