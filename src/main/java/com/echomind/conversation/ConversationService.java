@@ -35,7 +35,7 @@ public class ConversationService {
 
     /**
      * 会话已存在且属于别的用户时拒绝，防止拿别人的 conv_id 读写对方的记忆。
-     * 注意：在接入登录鉴权之前，user_id 仍由客户端传入。
+     * userId 来自登录令牌，客户端无法伪造。
      */
     public void assertWritable(String userId, String conversationId) {
         ConversationEntity existing = conversationMapper.selectById(conversationId);
@@ -68,6 +68,10 @@ public class ConversationService {
             // 不区分"不存在"和"不属于你"，避免泄露别人的会话是否存在
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在");
         }
+        return page(conversationId, beforeId, size);
+    }
+
+    private MessagePage page(String conversationId, Long beforeId, int size) {
         int pageSize = clamp(size);
         // 多查一条，用来判断是否还有下一页
         List<ChatMessageEntity> rows = messageMapper.pageBefore(conversationId, beforeId, pageSize + 1);
@@ -76,6 +80,20 @@ public class ConversationService {
         Long nextBeforeId = hasMore ? page.get(page.size() - 1).getId() : null;
         Collections.reverse(page);
         return new MessagePage(page, nextBeforeId);
+    }
+
+    /** 坐席 / 管理员查看任意客户的会话（数据范围由调用方按角色决定）。 */
+    public MessagePage listMessagesForStaff(String conversationId, Long beforeId, int size) {
+        ConversationEntity conversation = conversationMapper.selectById(conversationId);
+        if (conversation == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在");
+        }
+        return page(conversationId, beforeId, size);
+    }
+
+    /** 补写一条回复的处理轨迹。和对话落库一样是"尽力而为"，失败不影响回复。 */
+    public void saveTrace(String requestId, String traceJson) {
+        messageMapper.updateTrace(requestId, traceJson);
     }
 
     private ChatMessageEntity message(ChatTurn turn, MessageRole role, String content, LocalDateTime at) {

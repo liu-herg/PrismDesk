@@ -1,5 +1,8 @@
 package com.echomind.ticket;
 
+import com.echomind.auth.CurrentUser;
+import com.echomind.notify.TicketNotice;
+import com.echomind.notify.TicketNotifier;
 import com.echomind.store.TicketEntity;
 import com.echomind.store.TicketEventEntity;
 import io.swagger.v3.oas.annotations.Operation;
@@ -7,6 +10,8 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -25,9 +30,11 @@ import java.util.Map;
 public class TicketController {
 
     private final TicketService ticketService;
+    private final TicketNotifier notifier;
 
-    public TicketController(TicketService ticketService) {
+    public TicketController(TicketService ticketService, TicketNotifier notifier) {
         this.ticketService = ticketService;
+        this.notifier = notifier;
     }
 
     @GetMapping("/tickets")
@@ -55,17 +62,24 @@ public class TicketController {
 
     @PostMapping("/tickets/{id}/{action}")
     @Operation(summary = "工单操作", description = "action 取值：claim（认领）、release（退回）、resolve（解决）、close（关闭）、reopen（重新打开）。"
-            + "状态不允许或并发冲突返回 409，非处理人执行 release/resolve 返回 403。")
+            + "状态不允许或并发冲突返回 409，非处理人执行 release/resolve 返回 403。操作人取当前登录的坐席。")
     public Map<String, Object> act(@PathVariable long id,
                                    @PathVariable String action,
-                                   @Valid @RequestBody TicketActionRequest request) {
+                                   @Valid @RequestBody(required = false) TicketActionRequest request,
+                                   @AuthenticationPrincipal Jwt jwt) {
         TicketAction parsed;
         try {
             parsed = TicketAction.parse(action);
         } catch (IllegalArgumentException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage());
         }
-        return view(ticketService.transition(id, parsed, request.operator(), request.version(), request.note()));
+        // 操作人以登录身份为准：请求体里的 operator 字段（旧接口遗留）会被忽略，不能冒充别的坐席
+        CurrentUser operator = CurrentUser.of(jwt);
+        TicketEntity updated = ticketService.transition(id, parsed, operator.username(),
+                request == null ? null : request.version(), request == null ? null : request.note());
+        // transition 是 @Transactional 方法，返回时事务已提交，这时再通知
+        notifier.publish(TicketNotice.updated(updated, parsed.name(), operator.username(), operator.displayName()));
+        return view(updated);
     }
 
     private static TicketStatus parseStatus(String status) {

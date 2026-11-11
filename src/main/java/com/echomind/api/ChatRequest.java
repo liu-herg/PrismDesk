@@ -9,7 +9,7 @@ import jakarta.validation.constraints.NotBlank;
 public record ChatRequest(
         @Schema(description = "用户消息", example = "我想申请退款，订单号是 #12345")
         @NotBlank String message,
-        @Schema(description = "用户 ID，未传时默认为 anonymous", example = "u1001")
+        @Schema(description = "已废弃：用户身份取自登录令牌，这个字段会被忽略", example = "u1001", deprecated = true)
         String userId,
         @Schema(description = "会话 ID，未传时服务端自动生成", example = "conv-001")
         @JsonProperty("conv_id")

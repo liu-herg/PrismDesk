@@ -5,6 +5,9 @@ server:
       charset: UTF-8
       # 响应头显式带上 charset=UTF-8；否则 Windows PowerShell 5.1 会按 Latin-1 解码中文
       force-response: true
+  error:
+    # 错误响应里带上原因（例如"只有当前处理人才能执行 resolve"），前端直接展示给坐席
+    include-message: always
 
 spring:
   application:
@@ -68,6 +71,18 @@ management:
 springdoc:
   api-docs:
     path: /v3/api-docs
+
+prismdesk:
+  auth:
+    # HS256 签名密钥，至少 32 字节。本地演示用默认值即可，部署时务必用环境变量覆盖
+    jwt-secret: ${JWT_SECRET:prismdesk-local-dev-secret-change-me-0123456789}
+    access-ttl: ${JWT_ACCESS_TTL:15m}
+    refresh-ttl: ${JWT_REFRESH_TTL:7d}
+    max-login-failures: 5
+    lock-duration: 15m
+    # 启动时创建演示账号（u1001 / u1002 客户，agent-01 / agent-02 坐席，admin 管理员）
+    seed-demo-accounts: ${SEED_DEMO_ACCOUNTS:true}
+    demo-password: ${DEMO_PASSWORD:demo123}
 
 echomind:
   pipeline:

@@ -3,8 +3,16 @@
 #   .\scripts\bench.ps1 -Label parallel
 param(
     [string]$Label = "run",
-    [string]$BaseUrl = "http://127.0.0.1:8080"
+    [string]$BaseUrl = "http://127.0.0.1:8080",
+    # 接入登录后，对话接口需要客户账号的令牌；默认用演示账号
+    [string]$Username = "u1001",
+    [string]$Password = "demo123"
 )
+
+$login = @{ username = $Username; password = $Password } | ConvertTo-Json
+$token = (Invoke-RestMethod -Method Post -Uri "$BaseUrl/auth/login" -ContentType "application/json; charset=utf-8" `
+    -Body ([Text.Encoding]::UTF8.GetBytes($login))).access_token
+$headers = @{ Authorization = "Bearer $token" }
 
 $questions = @(
     "我想申请退款，需要满足什么条件",
@@ -18,8 +26,8 @@ $questions = @(
 )
 
 function Send-Chat($message, $conv) {
-    $body = @{ message = $message; user_id = "bench"; conv_id = $conv } | ConvertTo-Json
-    Invoke-RestMethod -Method Post -Uri "$BaseUrl/chat" -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
+    $body = @{ message = $message; conv_id = $conv } | ConvertTo-Json
+    Invoke-RestMethod -Method Post -Uri "$BaseUrl/chat" -Headers $headers -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
 }
 
 $run = Get-Random

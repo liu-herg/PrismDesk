@@ -22,6 +22,11 @@ public class ChatMessageEntity {
     private Boolean escalated;
     private Integer latencyMs;
     private LocalDateTime createdAt;
+    /** 处理轨迹 JSON，只有客服回复有。 */
+    private String trace;
+
+    public String getTrace() { return trace; }
+    public void setTrace(String trace) { this.trace = trace; }
 
     public Long getId() {
         return id;

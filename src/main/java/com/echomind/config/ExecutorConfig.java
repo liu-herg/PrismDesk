@@ -49,6 +49,21 @@ public class ExecutorConfig {
         return build("worker-", core, max, queue);
     }
 
+    /**
+     * 流式对话：一个任务就是一整轮对话（几秒到十几秒）。和上面两个池分开，避免占满后影响普通 /chat 的环节执行。
+     * 满了直接拒绝（推一条"当前咨询人数较多"），不用 CallerRunsPolicy：调用方是 Tomcat 请求线程，
+     * 让它去跑一整轮对话就失去了异步的意义。
+     */
+    @Bean("streamExecutor")
+    public ThreadPoolTaskExecutor streamExecutor(
+            @Value("${echomind.executor.stream.core:8}") int core,
+            @Value("${echomind.executor.stream.max:32}") int max,
+            @Value("${echomind.executor.stream.queue:16}") int queue) {
+        ThreadPoolTaskExecutor executor = build("stream-", core, max, queue);
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        return executor;
+    }
+
     private ThreadPoolTaskExecutor build(String prefix, int core, int max, int queue) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setThreadNamePrefix(prefix);

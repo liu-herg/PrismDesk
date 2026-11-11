@@ -24,4 +24,9 @@ public interface ChatMessageMapper extends BaseMapper<ChatMessageEntity> {
     List<ChatMessageEntity> pageBefore(@Param("conversationId") String conversationId,
                                        @Param("beforeId") Long beforeId,
                                        @Param("size") int size);
+
+    /** 回复生成完之后补写处理轨迹（JSON）。走 idx_request。 */
+    @org.apache.ibatis.annotations.Update(
+            "UPDATE chat_message SET trace = #{trace} WHERE request_id = #{requestId} AND role = 'ASSISTANT'")
+    int updateTrace(@Param("requestId") String requestId, @Param("trace") String trace);
 }

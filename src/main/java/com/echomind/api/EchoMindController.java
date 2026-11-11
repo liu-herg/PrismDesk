@@ -1,6 +1,10 @@
 package com.echomind.api;
 
 import com.echomind.agent.AgentOrchestrator;
+import com.echomind.auth.CurrentUser;
+import com.echomind.notify.TicketNotice;
+import com.echomind.notify.TicketNotifier;
+import com.echomind.pipeline.StageListener;
 import com.echomind.agent.AgentRequest;
 import com.echomind.agent.AgentType;
 import com.echomind.agent.AnswerVerifier;
@@ -38,7 +42,12 @@ import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -56,6 +65,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 
 @RestController
 @Tag(name = "EchoMind API", description = "智能客服对话、知识库、监控和评测接口")
@@ -80,6 +90,8 @@ public class EchoMindController {
     private final TicketService ticketService;
     private final Executor stageExecutor;
     private final Executor workerExecutor;
+    private final Executor streamExecutor;
+    private final TicketNotifier ticketNotifier;
 
     public EchoMindController(
             AgentOrchestrator orchestrator,
@@ -98,7 +110,9 @@ public class EchoMindController {
             EchoMindProperties properties,
             TicketService ticketService,
             @Qualifier("stageExecutor") Executor stageExecutor,
-            @Qualifier("workerExecutor") Executor workerExecutor
+            @Qualifier("workerExecutor") Executor workerExecutor,
+            @Qualifier("streamExecutor") Executor streamExecutor,
+            TicketNotifier ticketNotifier
     ) {
         this.orchestrator = orchestrator;
         this.intentRecognizer = intentRecognizer;
@@ -117,6 +131,8 @@ public class EchoMindController {
         this.ticketService = ticketService;
         this.stageExecutor = stageExecutor;
         this.workerExecutor = workerExecutor;
+        this.streamExecutor = streamExecutor;
+        this.ticketNotifier = ticketNotifier;
     }
 
     @GetMapping("/health")
@@ -127,22 +143,93 @@ public class EchoMindController {
 
     @PostMapping("/chat")
     @Operation(summary = "智能客服对话", description = "执行完整对话链路：记忆读取、知识库检索、意图识别、多 Agent 路由、回答校验和记忆写入。")
-    public ChatResponse chat(@Valid @RequestBody ChatRequest request) {
-        String userId = request.userIdOrDefault();
-        String conversationId = request.conversationId() == null || request.conversationId().isBlank()
-                ? UUID.randomUUID().toString()
-                : request.conversationId();
+    public ChatResponse chat(@Valid @RequestBody ChatRequest request, @AuthenticationPrincipal Jwt jwt) {
+        // 用户身份取自登录令牌；请求体里的 user_id（旧接口遗留）会被忽略，不能冒充别人
+        String userId = CurrentUser.of(jwt).username();
+        String conversationId = conversationIdOf(request);
         conversationService.assertWritable(userId, conversationId);
         // 同一会话的消息排队处理：读记忆 → 生成回复 → 写记忆 这一整轮期间持有会话锁，
         // 避免两条并发消息各自读到旧上下文、回复互相看不到对方。等待超时返回 429。
-        return conversationLock.execute(userId, conversationId, () -> handleChat(request, userId, conversationId));
+        return conversationLock.execute(userId, conversationId,
+                () -> handleChat(request, userId, conversationId, new StageTimer()));
     }
 
-    private ChatResponse handleChat(ChatRequest request, String userId, String conversationId) {
+    /**
+     * 流式对话（SSE）。和 /chat 走同一条处理链路，区别是每个环节开始、结束时都会推一条事件，
+     * 客户能实时看到"正在识别意图 / 正在检索知识库 / 正在生成回答"。
+     *
+     * <p>回答本身仍然在校验通过之后整段推送，而不是逐字推送：逐字推送意味着客户会先看到还没校验过的内容，
+     * 校验不通过时已经撤不回来了。客服场景里"说出去的话"要先过校验。
+     *
+     * <p>事件：stage（环节开始 / 结束）、degraded（环节降级）、reply（最终回复，内容同 /chat）、error。
+     */
+    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(summary = "流式对话（SSE）", description = "实时推送各处理环节的进度，最后推送完整回复。")
+    public SseEmitter chatStream(@Valid @RequestBody ChatRequest request, @AuthenticationPrincipal Jwt jwt) {
+        String userId = CurrentUser.of(jwt).username();
+        String conversationId = conversationIdOf(request);
+        conversationService.assertWritable(userId, conversationId);
+        SseEmitter emitter = new SseEmitter(Duration.ofMinutes(3).toMillis());
+        StageListener listener = new StageListener() {
+            @Override
+            public void started(String stage) {
+                sendEvent(emitter, "stage", Map.of("stage", stage, "state", "started"));
+            }
+
+            @Override
+            public void finished(String stage, long millis) {
+                sendEvent(emitter, "stage", Map.of("stage", stage, "state", "finished", "ms", millis));
+            }
+
+            @Override
+            public void degraded(String stage) {
+                sendEvent(emitter, "degraded", Map.of("stage", stage));
+            }
+        };
+        try {
+            // 整轮处理放到专门的线程池里跑，请求线程马上返回，Tomcat 线程不被长时间占住
+            streamExecutor.execute(() -> {
+                try {
+                    sendEvent(emitter, "accepted", Map.of("conv_id", conversationId));
+                    ChatResponse response = conversationLock.execute(userId, conversationId,
+                            () -> handleChat(request, userId, conversationId, new StageTimer(listener)));
+                    sendEvent(emitter, "reply", response);
+                    emitter.complete();
+                } catch (ResponseStatusException e) {
+                    sendEvent(emitter, "error", Map.of("status", e.getStatusCode().value(), "message", String.valueOf(e.getReason())));
+                    emitter.complete();
+                } catch (Exception e) {
+                    log.error("stream chat failed conv={}", conversationId, e);
+                    sendEvent(emitter, "error", Map.of("status", 500, "message", "处理失败，请稍后再试"));
+                    emitter.complete();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            sendEvent(emitter, "error", Map.of("status", 503, "message", "当前咨询人数较多，请稍后再试"));
+            emitter.complete();
+        }
+        return emitter;
+    }
+
+    private static String conversationIdOf(ChatRequest request) {
+        return request.conversationId() == null || request.conversationId().isBlank()
+                ? UUID.randomUUID().toString()
+                : request.conversationId();
+    }
+
+    private void sendEvent(SseEmitter emitter, String name, Object data) {
+        try {
+            emitter.send(SseEmitter.event().name(name).data(data, MediaType.APPLICATION_JSON));
+        } catch (Exception e) {
+            // 客户关掉了页面：处理照常完成并落库，只是推不出去了
+            log.debug("SSE send failed: {}", e.getMessage());
+        }
+    }
+
+    private ChatResponse handleChat(ChatRequest request, String userId, String conversationId, StageTimer timer) {
         String requestId = UUID.randomUUID().toString().substring(0, 8);
         String message = request.message();
         EchoMindProperties.Pipeline pipeline = properties.getPipeline();
-        StageTimer timer = new StageTimer();
 
         MemoryContext memoryContext = timer.record("memory", () -> memoryManager.getContext(userId, conversationId, message));
         String memoryText = memoryContext.toPromptText(objectMapper);
@@ -244,7 +331,7 @@ public class EchoMindController {
         recordStageMetrics(stageTimings, totalMs);
         log.info("chat request={} parallel={} total={}ms stages={} degraded={}",
                 requestId, pipeline.isParallel(), totalMs, stageTimings, timer.degradedStages());
-        return new ChatResponse(
+        ChatResponse response = new ChatResponse(
                 conversationId,
                 result.requestId(),
                 result.response(),
@@ -269,6 +356,36 @@ public class EchoMindController {
                 timer.degradedStages(),
                 ticketId
         );
+        saveTrace(response);
+        return response;
+    }
+
+    /**
+     * 把这条回复的处理轨迹（意图、路由、各环节耗时、降级、校验）存到消息上，
+     * 坐席查看历史对话时能看到每条回复"是怎么来的"。尽力而为，失败不影响回复。
+     */
+    private void saveTrace(ChatResponse r) {
+        try {
+            Map<String, Object> trace = new LinkedHashMap<>();
+            trace.put("intent", r.intent());
+            trace.put("intent_confidence", r.intentConfidence());
+            trace.put("agent_type", r.agentType());
+            trace.put("primary_agent", r.primaryAgent());
+            trace.put("supporting_agents", r.supportingAgents());
+            trace.put("routing_reason", r.routingReason());
+            trace.put("knowledge_used", r.knowledgeUsed());
+            trace.put("verified", r.verified());
+            trace.put("grounded", r.grounded());
+            trace.put("escalated", r.escalated());
+            trace.put("ticket_id", r.ticketId());
+            trace.put("total_ms", r.totalMs());
+            trace.put("stage_timings_ms", r.stageTimingsMs());
+            trace.put("degraded_stages", r.degradedStages());
+            trace.put("request_id", r.requestId());
+            conversationService.saveTrace(r.requestId(), objectMapper.writeValueAsString(trace));
+        } catch (Exception ex) {
+            log.warn("Failed to save trace request={}: {}", r.requestId(), ex.getMessage());
+        }
     }
 
     /**
@@ -305,6 +422,8 @@ public class EchoMindController {
             ));
             if (opened.created()) {
                 log.info("Ticket {} opened for conv={} request={} reason={}", opened.ticket().getId(), conversationId, requestId, reasons);
+                // openForEscalation 是 @Transactional 方法，返回时已提交；通知在线坐席有新工单
+                ticketNotifier.publish(TicketNotice.created(opened.ticket()));
             }
             return opened.ticket().getId();
         } catch (Exception ex) {

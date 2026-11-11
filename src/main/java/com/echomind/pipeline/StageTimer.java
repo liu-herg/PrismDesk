@@ -16,19 +16,42 @@ public class StageTimer {
     private final long startNanos = System.nanoTime();
     private final Map<String, Long> timings = Collections.synchronizedMap(new LinkedHashMap<>());
     private final List<String> degraded = Collections.synchronizedList(new ArrayList<>());
+    private final StageListener listener;
+
+    public StageTimer() {
+        this(StageListener.NONE);
+    }
+
+    /** 带进度回调：每个环节开始、结束、降级时通知 listener（流式对话用）。 */
+    public StageTimer(StageListener listener) {
+        this.listener = listener == null ? StageListener.NONE : listener;
+    }
 
     public <T> T record(String stage, Supplier<T> task) {
         long begin = System.nanoTime();
+        notify(() -> listener.started(stage));
         try {
             return task.get();
         } finally {
-            timings.merge(stage, (System.nanoTime() - begin) / 1_000_000, Long::sum);
+            long millis = (System.nanoTime() - begin) / 1_000_000;
+            timings.merge(stage, millis, Long::sum);
+            notify(() -> listener.finished(stage, millis));
         }
     }
 
     /** 标记某个环节走了降级（超时或失败）。 */
     public void markDegraded(String stage) {
         degraded.add(stage);
+        notify(() -> listener.degraded(stage));
+    }
+
+    /** 回调出错（比如客户断开了连接）不能影响处理本身 */
+    private static void notify(Runnable callback) {
+        try {
+            callback.run();
+        } catch (RuntimeException ignored) {
+            // 忽略
+        }
     }
 
     public long totalMillis() {
